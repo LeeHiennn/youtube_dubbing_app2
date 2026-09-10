@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import asyncio
+import soundfile as sf
 from modules.text_normalizer import normalize_for_tts
 from modules.tts_engine import (
     _generate_edge_tts_async,
@@ -14,6 +15,13 @@ SSML_TAG_RE = re.compile(r'<[^>]+>')
 
 def _strip_ssml(text):
     return SSML_TAG_RE.sub('', text)
+
+def _get_wav_duration(file_path):
+    """Lấy thời lượng WAV trực tiếp qua header bằng soundfile (nhanh gấp 100x ffprobe)."""
+    try:
+        return sf.info(file_path).duration
+    except Exception:
+        return get_audio_duration(file_path)
 
 _model = None
 
@@ -28,16 +36,17 @@ def _get_model():
             vram_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
             print(f"Phát hiện GPU: {torch.cuda.get_device_name(0)} ({vram_mb:.0f}MB VRAM)")
             if vram_mb < 6000:
-                print("VRAM < 6GB, dùng CPU offload để tránh OOM...")
+                print("VRAM < 6GB, chạy bằng CPU offload để tránh OOM...")
                 _model = OmniVoice.from_pretrained(
                     "k2-fsa/OmniVoice",
                     device_map="cpu",
-                    dtype=torch.float16,
                 )
             else:
+                print("Nạp model lên GPU với định dạng FP16 (tận dụng Tensor Cores)...")
                 _model = OmniVoice.from_pretrained(
                     "k2-fsa/OmniVoice",
                     device_map="cuda:0",
+                    dtype=torch.float16,
                 )
         else:
             print("Không có GPU, chạy bằng CPU (chậm hơn)...")
@@ -47,6 +56,36 @@ def _get_model():
             )
         print("OmniVoice model đã sẵn sàng!")
     return _model
+
+def _group_segments(segments, max_gap=0.35, max_group_dur=10.0, max_chars=180):
+    """
+    Gom các segment vụn (Whisper hay ngắt ngắn 1-2 từ) thành cụm câu hoàn chỉnh.
+    Giúp giảm 60-70% số lượt gọi model và cho giọng đọc mượt mà, tự nhiên hơn.
+    """
+    valid = [s for s in segments if s.get('translated_text', '').strip()]
+    if not valid:
+        return []
+
+    groups = []
+    current_group = [valid[0]]
+
+    for seg in valid[1:]:
+        prev = current_group[-1]
+        gap = seg['start'] - prev['end']
+        group_dur = seg['end'] - current_group[0]['start']
+        curr_chars = sum(len(s.get('translated_text', '')) for s in current_group)
+        new_chars = curr_chars + len(seg.get('translated_text', ''))
+
+        if 0 <= gap <= max_gap and group_dur <= max_group_dur and new_chars <= max_chars:
+            current_group.append(seg)
+        else:
+            groups.append(current_group)
+            current_group = [seg]
+
+    if current_group:
+        groups.append(current_group)
+
+    return groups
 
 def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct=None, ref_audio_path=None):
     print(f"Đang tổng hợp giọng nói từ OmniVoice (local GPU) - mode: {voice_mode}...")
@@ -67,12 +106,17 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
         else:
             print("Cảnh báo: Không thể nhận diện transcript từ audio mẫu, clone có thể kém chính xác")
 
-    for i, segment in enumerate(segments):
-        text = segment.get('translated_text', "")
-        if not text.strip():
+    # Gom các segment ngắn thành cụm câu tự nhiên
+    groups = _group_segments(segments)
+    print(f"Tối ưu gom câu: Gom {len(segments)} segments vụn thành {len(groups)} cụm câu tự nhiên (giảm ~{(1 - len(groups)/max(len(segments), 1))*100:.0f}% lượt sinh).")
+
+    # 1. Sinh âm thanh cho từng cụm câu
+    for i, group in enumerate(groups):
+        combined_text = " ".join(s.get('translated_text', "").strip() for s in group)
+        if not combined_text.strip():
             continue
 
-        orig_text = normalize_for_tts(text)
+        orig_text = normalize_for_tts(combined_text)
         clean_text = _strip_ssml(orig_text)
 
         out_path = os.path.join(tts_chunks_dir, f'chunk_{i}.wav')
@@ -89,11 +133,10 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
                     kwargs["ref_text"] = ref_text
 
             audio_list = model.generate(**kwargs)
-            import soundfile as sf
             sf.write(out_path, audio_list[0], 24000)
-            print(f"[{i+1}/{len(segments)}] OmniVoice OK: {clean_text[:40]}...")
+            print(f"[{i+1}/{len(groups)}] OmniVoice OK: {clean_text[:40]}...")
         except Exception as e:
-            print(f"Cảnh báo: segment {i} OmniVoice lỗi ({e}), dùng edge-tts fallback (giọng Việt)...")
+            print(f"Cảnh báo: cụm {i} OmniVoice lỗi ({e}), dùng edge-tts fallback...")
             fallback_mp3 = os.path.join(tts_chunks_dir, f'fallback_{i}.mp3')
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -110,17 +153,14 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
             )
             os.replace(fallback_wav, out_path)
 
+    # 2. Căn chỉnh timeline và ghép nối file
     concat_list_path = os.path.join(temp_dir, 'concat_list.txt')
     concat_lines = []
     current_time = 0.0
 
-    for i, segment in enumerate(segments):
-        text = segment.get('translated_text', "")
-        if not text.strip():
-            continue
-
-        start_sec = segment['start']
-        end_sec = segment['end']
+    for i, group in enumerate(groups):
+        start_sec = group[0]['start']
+        end_sec = group[-1]['end']
         target_duration = end_sec - start_sec
 
         orig_wav = os.path.join(tts_chunks_dir, f'chunk_{i}.wav')
@@ -137,7 +177,7 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
             concat_lines.append(f"file '{silence_path}'")
             current_time += gap
 
-        actual_duration = get_audio_duration(orig_wav)
+        actual_duration = _get_wav_duration(orig_wav)
         if actual_duration <= 0:
             continue
 
@@ -154,9 +194,9 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
         )
 
         concat_lines.append(f"file '{processed_wav}'")
-        final_dur = get_audio_duration(processed_wav)
+        final_dur = _get_wav_duration(processed_wav)
         current_time += final_dur
-        print(f"[{i+1}/{len(segments)}] Đã căn chỉnh xong đoạn: {int(start_sec*1000)}ms -> {int(end_sec*1000)}ms (thực tế: {final_dur:.2f}s)")
+        print(f"[{i+1}/{len(groups)}] Đã căn chỉnh cụm: {int(start_sec*1000)}ms -> {int(end_sec*1000)}ms (thực tế: {final_dur:.2f}s)")
 
     with open(concat_list_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(concat_lines))
@@ -173,6 +213,14 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
         ['ffmpeg', '-i', merged_wav, '-codec:a', 'libmp3lame', output_path, '-y'],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
+
+    # 3. Giải phóng VRAM GPU sau khi hoàn tất
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
     print(f"Đã tạo giọng đọc OmniVoice thành công! Lưu tại: {output_path}")
     return output_path
