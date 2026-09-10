@@ -200,43 +200,68 @@ def run_dubbing(url, source_lang_ui, voice_name, whisper_model, orig_volume, dub
     t = threading.Thread(target=worker)
     t.start()
     
+    import time
     try:
         while True:
-            try:
-                msg = q.get(timeout=0.2)
-                if isinstance(msg, tuple):
-                    status, result = msg
-                    if status == "ERROR":
-                        raise gr.Error(result)
-                    else:
-                        # process dataframe
-                        segments = result.get("segments", [])
-                        df_data = []
-                        fail_count = 0
-                        for seg in segments:
-                            start_str = f"{int(seg['start']//60)}:{int(seg['start']%60):02d}"
-                            end_str = f"{int(seg['end']//60)}:{int(seg['end']%60):02d}"
-                            translated = seg.get('translated_text', '')
-                            if seg.get('translation_ok') is False:
-                                translated = "[⚠ LỖI DỊCH] " + translated
-                                fail_count += 1
-                            df_data.append([f"{start_str} - {end_str}", seg.get('text', ''), translated])
-                        
-                        if fail_count > 0:
-                            log_history += f"\n⚠ {fail_count} đoạn dịch lỗi sẽ retry lần sau.\n"
+            new_logs = []
+            final_status = None
+            final_result = None
 
-                        yield log_history, result.get("video"), result.get("subtitled_video"), result.get("subtitle_vi"), result.get("subtitle_zh"), result.get("no_music"), result.get("vocal"), result.get("tts_audio"), df_data
-                        break
+            try:
+                msg = q.get(timeout=0.5)
+                if isinstance(msg, tuple):
+                    final_status, final_result = msg
                 else:
-                    log_history += msg + "\n"
-                    lines = log_history.strip().split("\n")
-                    if len(lines) > 20:
-                        log_history = "\n".join(lines[-20:]) + "\n"
-                    yield log_history, None, None, None, None, None, None, None, None
+                    new_logs.append(msg)
             except queue.Empty:
-                if not t.is_alive():
+                pass
+
+            # Lấy hết mọi log đang chờ trong queue để gom lại 1 lần cập nhật
+            while not q.empty():
+                try:
+                    m = q.get_nowait()
+                    if isinstance(m, tuple):
+                        final_status, final_result = m
+                    else:
+                        new_logs.append(m)
+                except queue.Empty:
                     break
+
+            # Nếu có tín hiệu kết thúc từ worker
+            if final_status is not None:
+                if final_status == "ERROR":
+                    raise gr.Error(final_result)
+                else:
+                    segments = final_result.get("segments", [])
+                    df_data = []
+                    fail_count = 0
+                    for seg in segments:
+                        start_str = f"{int(seg['start']//60)}:{int(seg['start']%60):02d}"
+                        end_str = f"{int(seg['end']//60)}:{int(seg['end']%60):02d}"
+                        translated = seg.get('translated_text', '')
+                        if seg.get('translation_ok') is False:
+                            translated = "[⚠ LỖI DỊCH] " + translated
+                            fail_count += 1
+                        df_data.append([f"{start_str} - {end_str}", seg.get('text', ''), translated])
+                    
+                    if fail_count > 0:
+                        log_history += f"\n⚠ {fail_count} đoạn dịch lỗi sẽ retry lần sau.\n"
+
+                    yield log_history, final_result.get("video"), final_result.get("subtitled_video"), final_result.get("subtitle_vi"), final_result.get("subtitle_zh"), final_result.get("no_music"), final_result.get("vocal"), final_result.get("tts_audio"), df_data
+                    break
+
+            # Chỉ yield cập nhật Web UI khi THỰC SỰ CÓ LOG MỚI
+            if new_logs:
+                for text in new_logs:
+                    log_history += text + "\n"
+                lines = log_history.strip().split("\n")
+                if len(lines) > 25:
+                    log_history = "\n".join(lines[-25:]) + "\n"
                 yield log_history, None, None, None, None, None, None, None, None
+
+            # Nếu worker kết thúc và không còn log -> thoát
+            if not t.is_alive() and q.empty():
+                break
     finally:
         sys.stdout = original_stdout
 
