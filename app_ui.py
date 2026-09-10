@@ -524,5 +524,8 @@ with gr.Blocks(title="AI YouTube Dubber", theme=gr.themes.Soft()) as app:
 
 if __name__ == "__main__":
     is_colab = "google.colab" in sys.modules or "--share" in sys.argv
-    app.launch(inbrowser=not is_colab, share=is_colab)
+    print("🚀 Đang khởi động Gradio server...")
+    sys.stdout.flush()
+    app.launch(inbrowser=not is_colab, share=is_colab, debug=True)
+
 

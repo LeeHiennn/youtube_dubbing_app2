@@ -4,8 +4,9 @@ import io
 import json
 import shutil
 
-# Đảm bảo in được tiếng Việt trên console Windows
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# Đảm bảo in được tiếng Việt trên console Windows (chỉ bật trên Windows, giữ line_buffering)
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
 
 from modules.downloader import download_media
 from modules.voice_separator import separate_full
