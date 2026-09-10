@@ -104,6 +104,13 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
             stt_audio_path = sep_result["vocals"]
             vocal_path = sep_result["vocals"]
             no_music_path = sep_result["no_music"]
+            # Giải phóng VRAM sau Demucs để nhường chỗ cho Whisper
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
         else:
             print("Bỏ qua bước tách giọng nói.")
 
@@ -123,6 +130,20 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
             stt_lang = None if source_lang == "auto" else source_lang
             segments = transcribe_audio(stt_audio_path, model_size=model_size, language=stt_lang)
             save_checkpoint(temp_dir, stt_cache_key, segments)
+        
+        # Giải phóng Whisper model khỏi VRAM để nhường chỗ cho TTS
+        try:
+            from modules.stt_engine import _whisper_model
+            import torch
+            if _whisper_model is not None:
+                import modules.stt_engine as stt_mod
+                del stt_mod._whisper_model
+                stt_mod._whisper_model = None
+                stt_mod._current_model_size = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except (ImportError, Exception):
+            pass
             
         if cancel_event and cancel_event.is_set(): return
         

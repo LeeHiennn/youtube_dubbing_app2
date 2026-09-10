@@ -32,7 +32,7 @@ async def _generate_edge_tts_async(text, output_path):
 
 async def generate_all_tts(segments, temp_dir):
     """Hàm tạo tất cả âm thanh song song bằng async semaphore để tránh lỗi event loop per segment."""
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(8)
     
     async def process_segment(i, text, path):
         async with sem:

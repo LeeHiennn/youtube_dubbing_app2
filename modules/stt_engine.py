@@ -1,7 +1,7 @@
 import os
 import json
+import subprocess
 import whisper
-from pydub import AudioSegment
 from modules.audio_chunker import split_audio
 
 _whisper_model = None
@@ -48,8 +48,16 @@ def transcribe_audio(audio_path, model_size="small", language=None):
     transcript_path = os.path.join(temp_dir, 'transcript.json')
     stt_checkpoint_path = os.path.join(temp_dir, 'stt_checkpoint.json')
     
-    audio = AudioSegment.from_file(audio_path)
-    duration_ms = len(audio)
+    # Dùng ffprobe đo duration (không cần decode toàn bộ audio vào RAM)
+    try:
+        probe_result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', audio_path],
+            capture_output=True, text=True
+        )
+        duration_ms = int(float(probe_result.stdout.strip()) * 1000)
+    except Exception:
+        duration_ms = 0  # Fallback: xử lý single-pass
     
     model = get_whisper_model(model_size)
     segments_data = []
