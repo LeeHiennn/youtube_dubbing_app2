@@ -1,0 +1,27 @@
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Temp processing files & Checkpoints
+temp/
+
+# Output media & large video/audio files
+*.mp4
+*.mp3
+*.wav
+*.m4a
+*.webm
+*.srt
+*.ass
+*.log
+
+# Keep saved reference voices
+!saved_voices/**
+
+# Sensitive cookies
+cookies.txt
