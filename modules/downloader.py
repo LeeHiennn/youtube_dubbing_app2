@@ -1,4 +1,5 @@
 import os
+import sys
 import yt_dlp
 
 def download_media(url):
@@ -36,11 +37,21 @@ def download_media(url):
     cookie_file = os.path.join(base_dir, 'cookies.txt')
     if os.path.exists(cookie_file):
         ydl_opts['cookiefile'] = cookie_file
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    elif sys.platform == 'win32':
+        try:
+            ydl_opts_chrome = dict(ydl_opts)
+            ydl_opts_chrome['cookiesfrombrowser'] = ('chrome',)
+            with yt_dlp.YoutubeDL(ydl_opts_chrome) as ydl:
+                ydl.download([url])
+        except Exception:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
     else:
-        ydl_opts['cookiesfrombrowser'] = ('chrome',)
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+        # Trên Linux/Colab: tải trực tiếp không cần Chrome cookies
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
         
     return {
         'video': video_path,
