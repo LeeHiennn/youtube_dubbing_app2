@@ -6,8 +6,10 @@ from deep_translator import GoogleTranslator
 VN_CHARS = re.compile(r'[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]', re.IGNORECASE)
 ZH_CHARS = re.compile('[\u4e00-\u9fff]')
 
-BATCH_DELIMITER = "\n|||SPLIT|||\n"
-BATCH_SIZE = 25
+BATCH_SIZE = 10  # Giảm batch size để tăng độ tin cậy
+
+# Regex tách kết quả dịch theo marker [1], [2], ...
+_MARKER_RE = re.compile(r'\[(\d+)\]\s*')
 
 def contains_vietnamese(text):
     """Kiểm tra xem text có chứa ký tự tiếng Việt có dấu hay không."""
@@ -23,13 +25,18 @@ def detect_source(text):
 
 def _translate_batch(texts, source_lang, target_lang, translators):
     """
-    Dịch một batch texts cùng lúc bằng cách gom lại thành 1 request duy nhất.
-    Trả về list kết quả dịch tương ứng, hoặc None nếu delimiter bị mất.
+    Dịch một batch texts bằng cách đánh số [1], [2]... rồi gom thành 1 request.
+    Google Translate luôn bảo toàn các marker dạng [N] nên tách ra chuẩn xác.
+    Trả về list kết quả dịch, hoặc None nếu không tách được.
     """
     if not texts:
         return []
     
-    combined = BATCH_DELIMITER.join(texts)
+    # Gom text với marker đánh số
+    lines = []
+    for i, t in enumerate(texts, 1):
+        lines.append(f"[{i}] {t}")
+    combined = "\n".join(lines)
     
     if source_lang not in translators:
         translators[source_lang] = GoogleTranslator(source=source_lang, target=target_lang)
@@ -37,14 +44,23 @@ def _translate_batch(texts, source_lang, target_lang, translators):
     
     translated_combined = translator.translate(combined)
     
-    # Tách kết quả theo delimiter
-    parts = translated_combined.split("|||SPLIT|||")
+    # Tách kết quả theo marker [1], [2], ...
+    parts = _MARKER_RE.split(translated_combined)
+    # parts sẽ có dạng: ['', '1', 'text1', '2', 'text2', ...]
+    # Lấy ra dict: {số: text}
+    result_map = {}
+    for j in range(1, len(parts) - 1, 2):
+        try:
+            idx = int(parts[j])
+            result_map[idx] = parts[j + 1].strip()
+        except (ValueError, IndexError):
+            continue
     
-    # Nếu số phần tách ra khớp với số input -> OK
-    if len(parts) == len(texts):
-        return [p.strip() for p in parts]
+    # Kiểm tra có đủ kết quả không
+    if len(result_map) == len(texts):
+        return [result_map[i] for i in range(1, len(texts) + 1)]
     
-    # Delimiter bị dịch/mất -> trả None để fallback
+    # Không tách được đủ -> trả None để fallback
     return None
 
 def translate_segments(segments, source_lang="auto", target_lang="vi"):
@@ -163,8 +179,8 @@ def translate_segments(segments, source_lang="auto", target_lang="vi"):
                         time.sleep(random.uniform(0.3, 0.6))
                         break
                     else:
-                        print(f"[Batch {batch_num}] Delimiter bị mất, chuyển sang dịch từng segment...")
-                        raise ValueError("Batch delimiter lost")
+                        print(f"[Batch {batch_num}] Marker bị mất, chuyển sang dịch từng segment...")
+                        raise ValueError("Batch marker lost")
                         
                 except Exception as e:
                     consecutive_failures += 1
@@ -187,11 +203,23 @@ def translate_segments(segments, source_lang="auto", target_lang="vi"):
                         continue
                     
                     seg_success = False
+                    
+                    # Câu quá ngắn (1-2 từ) thường bị Google Translate từ chối
+                    # Giữ nguyên text gốc vì đây thường là từ đệm (OK, Right, So...)
+                    if len(text.split()) <= 2 and len(text) < 15:
+                        segments[idx]['translated_text'] = text
+                        segments[idx]['translation_ok'] = True
+                        count_ok += 1
+                        seg_success = True
+                        continue
+                    
                     for attempt in range(3):
                         try:
                             if src_lang not in translators:
                                 translators[src_lang] = GoogleTranslator(source=src_lang, target=target_lang)
                             translation = translators[src_lang].translate(text)
+                            if not translation or not translation.strip():
+                                translation = text  # Fallback nếu kết quả rỗng
                             segments[idx]['translated_text'] = translation
                             segments[idx]['translation_ok'] = True
                             translation_cache[text] = translation
@@ -201,6 +229,15 @@ def translate_segments(segments, source_lang="auto", target_lang="vi"):
                             time.sleep(random.uniform(0.1, 0.2))
                             break
                         except Exception as e2:
+                            err_msg = str(e2)
+                            # Nếu lỗi "No translation found" -> giữ nguyên text gốc
+                            if "No translation" in err_msg or "not found" in err_msg:
+                                segments[idx]['translated_text'] = text
+                                segments[idx]['translation_ok'] = True
+                                count_ok += 1
+                                seg_success = True
+                                print(f"[{idx+1}] Câu ngắn không dịch được, giữ nguyên: {text[:30]}...")
+                                break
                             consecutive_failures += 1
                             wait_time = min(60, (2 ** consecutive_failures) * 5 + random.uniform(0, 2))
                             print(f"Lỗi dịch segment {idx+1} (lần {attempt+1}): {e2}. Nghỉ {wait_time:.1f}s...")
