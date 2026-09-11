@@ -95,7 +95,7 @@ def preview_voice(text, tts_engine_choice, voice_mode_choice, voice_instruct, re
         return out_path
 
     # OmniVoice
-    from modules.tts_engine_omnivoice import _get_model
+    from modules.tts_engine_omnivoice import _get_model, _prepare_ref_audio
     model = _get_model()
 
     if voice_mode_choice == "🎭 Clone giọng (Voice Clone)":
@@ -106,16 +106,32 @@ def preview_voice(text, tts_engine_choice, voice_mode_choice, voice_instruct, re
             audio_path = ref_audio
 
         if audio_path and os.path.exists(audio_path):
-            from modules.stt_engine import transcribe_audio
-            ref_segments = transcribe_audio(audio_path, model_size="tiny")
-            ref_text = " ".join(seg['text'] for seg in ref_segments) if ref_segments else None
-            audio_list = model.generate(text=text, ref_audio=audio_path, ref_text=ref_text)
+            audio_path = _prepare_ref_audio(audio_path, out_dir)
+            ref_text_file = os.path.join(os.path.dirname(audio_path), 'ref_text.txt')
+            ref_text = None
+            if os.path.exists(ref_text_file):
+                try:
+                    with open(ref_text_file, 'r', encoding='utf-8') as f:
+                        ref_text = f.read().strip()
+                except Exception:
+                    ref_text = None
+            if not ref_text:
+                from modules.stt_engine import transcribe_audio
+                ref_segments = transcribe_audio(audio_path, model_size="tiny")
+                ref_text = " ".join(seg['text'] for seg in ref_segments) if ref_segments else None
+                if ref_text:
+                    try:
+                        with open(ref_text_file, 'w', encoding='utf-8') as f:
+                            f.write(ref_text)
+                    except Exception:
+                        pass
+            audio_list = model.generate(text=text, ref_audio=audio_path, ref_text=ref_text, num_step=16)
         else:
-            audio_list = model.generate(text=text, instruct="female")
+            audio_list = model.generate(text=text, instruct="female", num_step=16)
     elif voice_mode_choice == "🎨 Thiết kế giọng (Voice Design)" and voice_instruct:
-        audio_list = model.generate(text=text, instruct=voice_instruct)
+        audio_list = model.generate(text=text, instruct=voice_instruct, num_step=16)
     else:
-        audio_list = model.generate(text=text, instruct="female")
+        audio_list = model.generate(text=text, instruct="female", num_step=16)
 
     import soundfile as sf
     sf.write(out_path, audio_list[0], 24000)
