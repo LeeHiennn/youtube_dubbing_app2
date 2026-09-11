@@ -32,6 +32,11 @@ def download_media(url):
             'preferredquality': '192',
         }],
         'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web']
+            }
+        }
     }
     
     cookie_file = os.path.join(base_dir, 'cookies.txt')

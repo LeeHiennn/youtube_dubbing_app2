@@ -46,11 +46,11 @@ def detect_duration(url):
         import os, sys
         cookie_file = os.path.join(os.path.dirname(__file__), 'cookies.txt')
         if os.path.exists(cookie_file):
-            cmd = ['yt-dlp', '--cookies', cookie_file, '--print', 'duration', url]
+            cmd = ['yt-dlp', '--cookies', cookie_file, '--extractor-args', 'youtube:player_client=android,ios,web', '--print', 'duration', url]
         elif sys.platform == 'win32':
             cmd = ['yt-dlp', '--cookies-from-browser', 'chrome', '--print', 'duration', url]
         else:
-            cmd = ['yt-dlp', '--print', 'duration', url]
+            cmd = ['yt-dlp', '--extractor-args', 'youtube:player_client=android,ios,web', '--print', 'duration', url]
             
         result = subprocess.run(
             cmd,
