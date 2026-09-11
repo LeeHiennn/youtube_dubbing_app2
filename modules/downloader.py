@@ -21,7 +21,7 @@ def download_media(url):
     if os.path.exists(audio_path):
         os.remove(audio_path)
         
-    ydl_opts = {
+    base_ydl_opts = {
         'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
         'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
         'merge_output_format': 'mp4',
@@ -32,20 +32,18 @@ def download_media(url):
             'preferredquality': '192',
         }],
         'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'web']
-            }
-        }
+        'js_runtimes': {
+            'node': {},
+        },
     }
     
     cookie_file = os.path.join(base_dir, 'cookies.txt')
     downloaded = False
     
-    # 1. Thử dùng cookie file nếu có (bọc try-except để nếu cookie lỗi/hết hạn thì tự fallback)
+    # 1. Thử dùng cookie file với Node.js runtime (giải mã challenge của YouTube)
     if os.path.exists(cookie_file):
         try:
-            ydl_opts_cookie = dict(ydl_opts)
+            ydl_opts_cookie = dict(base_ydl_opts)
             ydl_opts_cookie['cookiefile'] = cookie_file
             with yt_dlp.YoutubeDL(ydl_opts_cookie) as ydl:
                 ydl.download([url])
@@ -57,7 +55,7 @@ def download_media(url):
     # 2. Nếu trên Windows và chưa tải được: thử cookie từ Chrome
     if not downloaded and sys.platform == 'win32':
         try:
-            ydl_opts_chrome = dict(ydl_opts)
+            ydl_opts_chrome = dict(base_ydl_opts)
             ydl_opts_chrome['cookiesfrombrowser'] = ('chrome',)
             with yt_dlp.YoutubeDL(ydl_opts_chrome) as ydl:
                 ydl.download([url])
@@ -65,9 +63,15 @@ def download_media(url):
         except Exception:
             downloaded = False
 
-    # 3. Tải trực tiếp qua giả lập Mobile Client (iOS / Android / Web)
+    # 3. Tải trực tiếp qua giả lập Mobile Client (iOS & Android) nếu không có cookie
     if not downloaded:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl_opts_mobile = dict(base_ydl_opts)
+        ydl_opts_mobile['extractor_args'] = {
+            'youtube': {
+                'player_client': ['ios', 'android']
+            }
+        }
+        with yt_dlp.YoutubeDL(ydl_opts_mobile) as ydl:
             ydl.download([url])
         
     return {
