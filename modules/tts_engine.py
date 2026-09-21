@@ -115,6 +115,7 @@ def align_and_concat(groups, tts_chunks_dir, temp_dir, video_duration=None,
 
         orig_file = os.path.join(tts_chunks_dir, f'chunk_{i}{chunk_ext}')
         if not os.path.exists(orig_file):
+            print(f"⚠️ Cụm {i}: File chunk không tồn tại, bỏ qua")
             continue
 
         # Chèn khoảng lặng
@@ -133,45 +134,66 @@ def align_and_concat(groups, tts_chunks_dir, temp_dir, video_duration=None,
 
         actual_duration = get_duration_fn(orig_file)
         if actual_duration <= 0:
+            print(f"⚠️ Cụm {i}: Không đọc được duration, dùng file gốc trực tiếp...")
+            # Thử convert sang WAV chuẩn và dùng luôn
+            rescue_wav = os.path.join(tts_chunks_dir, f'rescue_{i}.wav')
+            subprocess.run(
+                ['ffmpeg', '-i', orig_file, '-ar', '44100', '-ac', '1', rescue_wav, '-y'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            if os.path.exists(rescue_wav) and os.path.getsize(rescue_wav) > 1000:
+                concat_lines.append(f"file '{rescue_wav}'")
+                rescue_dur = get_duration_fn(rescue_wav)
+                current_time += rescue_dur if rescue_dur > 0 else target_duration
+                print(f"[{i+1}/{len(groups)}] Đã cứu cụm {i} bằng re-encode")
+            else:
+                print(f"❌ Cụm {i}: Không thể cứu, bỏ qua")
             continue
 
-        speed_factor = actual_duration / target_duration
+        speed_factor = actual_duration / target_duration if target_duration > 0 else 1.0
         processed_wav = os.path.join(tts_chunks_dir, f'processed_{i}.wav')
 
         # Quyết định tốc độ: chỉ điều chỉnh nhẹ trong khoảng tự nhiên
         if MIN_SPEED_NATURAL <= speed_factor <= MAX_SPEED_NATURAL:
-            # Trong khoảng tự nhiên → áp dụng atempo + fade
+            # Trong khoảng tự nhiên → áp dụng atempo
             atempo_filter = _create_atempo_filter(speed_factor)
-            audio_filter = f'{atempo_filter}'
+            result = subprocess.run(
+                ['ffmpeg', '-i', orig_file, '-filter:a', atempo_filter,
+                 '-ar', '44100', processed_wav, '-y'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+            )
         else:
             # Ngoài khoảng tự nhiên → CHẤP NHẬN DRIFT, giữ tốc độ gốc
             if speed_factor > MAX_SPEED_NATURAL:
                 print(f"⚠️ Cụm {i}: TTS dài hơn gốc {speed_factor:.2f}x → chấp nhận drift (không ép tốc)")
             elif speed_factor < MIN_SPEED_NATURAL:
                 print(f"⚠️ Cụm {i}: TTS ngắn hơn gốc {speed_factor:.2f}x → chấp nhận drift")
-            audio_filter = 'anull'  # Không đổi tốc độ
+            # Copy sang WAV chuẩn (không đổi tốc)
+            result = subprocess.run(
+                ['ffmpeg', '-i', orig_file, '-ar', '44100', '-ac', '1', processed_wav, '-y'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+            )
 
-        # Thêm fade in/out
-        # Lấy duration thực tế sau atempo (nếu áp dụng)
-        if audio_filter == 'anull':
-            fade_dur = actual_duration
+        # Kiểm tra file output có hợp lệ không
+        if not os.path.exists(processed_wav) or os.path.getsize(processed_wav) < 1000:
+            print(f"⚠️ Cụm {i}: FFmpeg xử lý thất bại, dùng file gốc...")
+            # Fallback: dùng file gốc trực tiếp
+            subprocess.run(
+                ['ffmpeg', '-i', orig_file, '-ar', '44100', '-ac', '1', processed_wav, '-y'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+
+        # Kiểm tra lần cuối
+        if os.path.exists(processed_wav) and os.path.getsize(processed_wav) > 1000:
+            concat_lines.append(f"file '{processed_wav}'")
+            final_dur = get_duration_fn(processed_wav)
+            if final_dur <= 0:
+                final_dur = actual_duration  # Fallback duration
+            current_time += final_dur
+            print(f"[{i+1}/{len(groups)}] Đã căn chỉnh cụm: {int(start_sec*1000)}ms → {int(end_sec*1000)}ms "
+                  f"(thực tế: {final_dur:.2f}s, target: {target_duration:.2f}s)")
         else:
-            fade_dur = actual_duration / speed_factor if speed_factor > 0 else actual_duration
-
-        fade_out_start = max(0, fade_dur - FADE_DURATION)
-        full_filter = f'{audio_filter},afade=t=in:d={FADE_DURATION:.3f},afade=t=out:st={fade_out_start:.3f}:d={FADE_DURATION:.3f}'
-
-        subprocess.run(
-            ['ffmpeg', '-i', orig_file, '-filter:a', full_filter,
-             '-ar', '44100', processed_wav, '-y'],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-
-        concat_lines.append(f"file '{processed_wav}'")
-        final_dur = get_duration_fn(processed_wav)
-        current_time += final_dur
-        print(f"[{i+1}/{len(groups)}] Đã căn chỉnh cụm: {int(start_sec*1000)}ms → {int(end_sec*1000)}ms "
-              f"(thực tế: {final_dur:.2f}s, target: {target_duration:.2f}s)")
+            print(f"❌ Cụm {i}: Mất hoàn toàn, không thể phục hồi")
 
     with open(concat_list_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(concat_lines))
