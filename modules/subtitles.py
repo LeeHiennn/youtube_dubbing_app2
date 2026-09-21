@@ -111,8 +111,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f.write(content)
     return out_path
 
+def _has_nvenc():
+    """Kiểm tra xem FFmpeg có hỗ trợ NVIDIA h264_nvenc không."""
+    try:
+        res = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-encoders'],
+            capture_output=True, text=True, encoding='utf-8', errors='ignore'
+        )
+        return 'h264_nvenc' in res.stdout
+    except Exception:
+        return False
+
 def burn_subtitles(video_in, sub_path, video_out, fonts_dir=None):
-    """Hard-burn phụ đề vào video sử dụng ffmpeg."""
+    """Hard-burn phụ đề vào video sử dụng ffmpeg.
+    Tự động dùng GPU NVIDIA (h264_nvenc) nếu có, fallback CPU ultrafast."""
     # Escape đường dẫn cho ffmpeg filter trên Windows
     escaped_path = sub_path.replace('\\', '\\\\').replace(':', '\\:')
     
@@ -123,11 +135,21 @@ def burn_subtitles(video_in, sub_path, video_out, fonts_dir=None):
     if fonts_dir:
         esc_fonts_dir = fonts_dir.replace('\\', '\\\\').replace(':', '\\:')
         filter_arg += f":fontsdir='{esc_fonts_dir}'"
-        
+    
+    # Chọn encoder: GPU (nhanh 5-10x) hoặc CPU ultrafast
+    use_nvenc = _has_nvenc()
+    if use_nvenc:
+        print("⚡ Phát hiện NVIDIA GPU → dùng h264_nvenc để burn subtitle (nhanh gấp 5-10x)...")
+        encode_args = ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23']
+    else:
+        print("⚠️ Không có NVIDIA GPU → dùng CPU libx264 ultrafast...")
+        encode_args = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23']
+    
     cmd = [
-        'ffmpeg', '-y', '-i', video_in, 
-        '-vf', filter_arg, 
-        '-c:a', 'copy', 
+        'ffmpeg', '-y', '-i', video_in,
+        '-vf', filter_arg,
+        *encode_args,
+        '-c:a', 'copy',
         video_out
     ]
     
@@ -135,7 +157,21 @@ def burn_subtitles(video_in, sub_path, video_out, fonts_dir=None):
     result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
     
     if result.returncode != 0:
-        raise Exception(f"Lỗi ffmpeg: {result.stderr}")
+        # Nếu nvenc lỗi (driver cũ, VRAM không đủ) → fallback CPU
+        if use_nvenc:
+            print("⚠️ h264_nvenc lỗi, fallback về CPU ultrafast...")
+            cmd_fallback = [
+                'ffmpeg', '-y', '-i', video_in,
+                '-vf', filter_arg,
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+                '-c:a', 'copy',
+                video_out
+            ]
+            result = subprocess.run(cmd_fallback, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            if result.returncode != 0:
+                raise Exception(f"Lỗi ffmpeg: {result.stderr}")
+        else:
+            raise Exception(f"Lỗi ffmpeg: {result.stderr}")
         
     return video_out
 
