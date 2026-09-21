@@ -4,17 +4,21 @@ import subprocess
 import asyncio
 import soundfile as sf
 from modules.text_normalizer import normalize_for_tts
+from modules.sentence_grouper import group_into_sentences
 from modules.tts_engine import (
     _generate_edge_tts_async,
     get_audio_duration,
-    _create_atempo_filter,
+    align_and_concat,
     VOICE_NAME as _edge_voice,
+    NATURAL_RATE,
 )
 
 SSML_TAG_RE = re.compile(r'<[^>]+>')
 
+
 def _strip_ssml(text):
     return SSML_TAG_RE.sub('', text)
+
 
 def _get_wav_duration(file_path):
     """Lấy thời lượng WAV trực tiếp qua header bằng soundfile (nhanh gấp 100x ffprobe)."""
@@ -23,7 +27,9 @@ def _get_wav_duration(file_path):
     except Exception:
         return get_audio_duration(file_path)
 
+
 _model = None
+
 
 def _get_model():
     global _model
@@ -57,35 +63,6 @@ def _get_model():
         print("OmniVoice model đã sẵn sàng!")
     return _model
 
-def _group_segments(segments, max_gap=0.45, max_group_dur=10.0, max_chars=180):
-    """
-    Gom các segment vụn (Whisper hay ngắt ngắn 1-2 từ) thành cụm câu hoàn chỉnh.
-    Giúp giảm 60-70% số lượt gọi model và cho giọng đọc mượt mà, tự nhiên hơn.
-    """
-    valid = [s for s in segments if s.get('translated_text', '').strip()]
-    if not valid:
-        return []
-
-    groups = []
-    current_group = [valid[0]]
-
-    for seg in valid[1:]:
-        prev = current_group[-1]
-        gap = seg['start'] - prev['end']
-        group_dur = seg['end'] - current_group[0]['start']
-        curr_chars = sum(len(s.get('translated_text', '')) for s in current_group)
-        new_chars = curr_chars + len(seg.get('translated_text', ''))
-
-        if 0 <= gap <= max_gap and group_dur <= max_group_dur and new_chars <= max_chars:
-            current_group.append(seg)
-        else:
-            groups.append(current_group)
-            current_group = [seg]
-
-    if current_group:
-        groups.append(current_group)
-
-    return groups
 
 def _prepare_ref_audio(ref_audio_path, temp_dir):
     """
@@ -96,7 +73,7 @@ def _prepare_ref_audio(ref_audio_path, temp_dir):
     """
     if not ref_audio_path or not os.path.exists(ref_audio_path):
         return ref_audio_path
-        
+
     try:
         dur = _get_wav_duration(ref_audio_path)
         if dur > 8.0:
@@ -109,6 +86,7 @@ def _prepare_ref_audio(ref_audio_path, temp_dir):
     except Exception as e:
         print(f"Không thể cắt audio mẫu: {e}")
     return ref_audio_path
+
 
 def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct=None, ref_audio_path=None):
     print(f"Đang tổng hợp giọng nói từ OmniVoice (local GPU) - mode: {voice_mode}...")
@@ -145,9 +123,10 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
             else:
                 print("Cảnh báo: Không thể nhận diện transcript từ audio mẫu, clone có thể kém chính xác")
 
-    # Gom các segment ngắn thành cụm câu tự nhiên
-    groups = _group_segments(segments)
-    print(f"Tối ưu gom câu: Gom {len(segments)} segments vụn thành {len(groups)} cụm câu tự nhiên (giảm ~{(1 - len(groups)/max(len(segments), 1))*100:.0f}% lượt sinh).")
+    # Gom các segment thành cụm câu tự nhiên (dùng shared grouper)
+    groups = group_into_sentences(segments, text_key='translated_text')
+    print(f"Tối ưu gom câu: Gom {len(segments)} segments vụn thành {len(groups)} cụm câu tự nhiên "
+          f"(giảm ~{(1 - len(groups)/max(len(segments), 1))*100:.0f}% lượt sinh).")
 
     # 1. Sinh âm thanh cho từng cụm câu
     for i, group in enumerate(groups):
@@ -165,7 +144,7 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
         try:
             kwargs = {
                 "text": clean_text,
-                "num_step": 16,  # Tối ưu 16 bước khuếch tán (nhanh gấp đôi so với 32 mặc định)
+                "num_step": 16,
             }
             if voice_instruct:
                 kwargs["instruct"] = voice_instruct
@@ -195,65 +174,10 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
             )
             os.replace(fallback_wav, out_path)
 
-    # 2. Căn chỉnh timeline và ghép nối file
-    concat_list_path = os.path.join(temp_dir, 'concat_list.txt')
-    concat_lines = []
-    current_time = 0.0
-
-    for i, group in enumerate(groups):
-        start_sec = group[0]['start']
-        end_sec = group[-1]['end']
-        target_duration = end_sec - start_sec
-
-        orig_wav = os.path.join(tts_chunks_dir, f'chunk_{i}.wav')
-        if not os.path.exists(orig_wav):
-            continue
-
-        gap = start_sec - current_time
-        if gap > 0.001:
-            silence_path = os.path.join(tts_chunks_dir, f'silence_{i}.wav')
-            subprocess.run(
-                ['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono', '-t', f'{gap:.4f}', silence_path, '-y'],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            concat_lines.append(f"file '{silence_path}'")
-            current_time += gap
-
-        actual_duration = _get_wav_duration(orig_wav)
-        if actual_duration <= 0:
-            continue
-
-        speed_factor = actual_duration / target_duration
-        MAX_SPEED = 2.5
-        MIN_SPEED = 0.8
-        clamped_speed = max(MIN_SPEED, min(MAX_SPEED, speed_factor))
-
-        processed_wav = os.path.join(tts_chunks_dir, f'processed_{i}.wav')
-        atempo_filter = _create_atempo_filter(clamped_speed)
-        subprocess.run(
-            ['ffmpeg', '-i', orig_wav, '-filter:a', atempo_filter, '-ar', '44100', processed_wav, '-y'],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-
-        concat_lines.append(f"file '{processed_wav}'")
-        final_dur = _get_wav_duration(processed_wav)
-        current_time += final_dur
-        print(f"[{i+1}/{len(groups)}] Đã căn chỉnh cụm: {int(start_sec*1000)}ms -> {int(end_sec*1000)}ms (thực tế: {final_dur:.2f}s)")
-
-    with open(concat_list_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(concat_lines))
-
-    merged_wav = os.path.join(temp_dir, 'merged_temp.wav')
-    subprocess.run(
-        ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list_path,
-         '-c:a', 'pcm_s16le', '-ar', '44100', '-ac', '1', merged_wav, '-y'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-
-    output_path = os.path.join(temp_dir, 'merged_audio.mp3')
-    subprocess.run(
-        ['ffmpeg', '-i', merged_wav, '-codec:a', 'libmp3lame', output_path, '-y'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    # 2. Căn chỉnh timeline và ghép nối bằng hàm chung
+    output_path = align_and_concat(
+        groups, tts_chunks_dir, temp_dir,
+        get_duration_fn=_get_wav_duration, chunk_ext='.wav'
     )
 
     # 3. Giải phóng VRAM GPU sau khi hoàn tất
