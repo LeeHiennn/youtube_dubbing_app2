@@ -3,6 +3,7 @@ import sys
 import io
 import json
 import shutil
+import time
 
 # Đảm bảo in được tiếng Việt trên console Windows (chỉ bật trên Windows, giữ line_buffering)
 if sys.platform == 'win32':
@@ -28,6 +29,31 @@ def load_checkpoint(temp_dir, name):
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return None
+
+def _fmt_dur(seconds):
+    """Format số giây thành chuỗi dễ đọc: 1h 23m 45s hoặc 2m 30s hoặc 15.2s."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}h {m:02d}m {s:02d}s"
+    return f"{m}m {s:02d}s"
+
+def _print_timing_summary(timings, total_time):
+    """In bảng tổng kết thời gian từng công đoạn."""
+    print("\n" + "=" * 60)
+    print("📊  BẢNG TỔNG KẾT THỜI GIAN LỒNG TIẾNG")
+    print("=" * 60)
+    print(f"{'Công đoạn':<35} {'Thời gian':>10} {'Tỷ lệ':>8}")
+    print("-" * 60)
+    for name, duration in timings:
+        pct = (duration / total_time * 100) if total_time > 0 else 0
+        bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
+        print(f"  {name:<33} {_fmt_dur(duration):>10} {pct:>5.1f}%  {bar}")
+    print("-" * 60)
+    print(f"  {'⏱️  TỔNG CỘNG':<33} {_fmt_dur(total_time):>10} {'100%':>6}")
+    print("=" * 60 + "\n")
 
 def cleanup_temp_files():
     """Dọn dẹp xóa mọi file rác trong thư mục temp/ sau khi hoàn thành thành công."""
@@ -76,6 +102,9 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
         f.write(url)
     
     success = False
+    pipeline_start = time.time()
+    timings = []  # [(tên_bước, thời_gian_giây)]
+    
     try:
         if cancel_event and cancel_event.is_set(): return
         
@@ -83,6 +112,7 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
         if progress: progress(0.05, desc="Đang tải Video & Audio từ YouTube...")
         print(f"Bắt đầu xử lý URL: {url}")
         
+        t0 = time.time()
         video_path = os.path.join(temp_dir, 'video.mp4')
         audio_path = os.path.join(temp_dir, 'video.mp3')
         if os.path.exists(video_path) and os.path.exists(audio_path):
@@ -91,6 +121,7 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
             media_paths = download_media(url)
             video_path = media_paths['video']
             audio_path = media_paths['audio']
+        timings.append(("📥 Tải video YouTube", time.time() - t0))
             
         if cancel_event and cancel_event.is_set(): return
         
@@ -100,10 +131,12 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
         vocal_path = audio_path
         if separate_vocals_flag:
             if progress: progress(0.15, desc="Đang tách giọng nói khỏi nhạc nền...")
+            t0 = time.time()
             sep_result = separate_full(audio_path, temp_dir)
             stt_audio_path = sep_result["vocals"]
             vocal_path = sep_result["vocals"]
             no_music_path = sep_result["no_music"]
+            timings.append(("🎵 Tách giọng (Demucs)", time.time() - t0))
             # Giải phóng VRAM sau Demucs để nhường chỗ cho Whisper
             try:
                 import torch
@@ -119,6 +152,7 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
         # Bước 2: STT (Speech-to-Text)
         if progress: progress(0.3, desc=f"AI đang bóc băng lời nói (Whisper {model_size})...")
         
+        t0 = time.time()
         stt_cache_key = f'stt_{source_lang}'
         segments = load_checkpoint(temp_dir, stt_cache_key)
         if not segments:
@@ -130,6 +164,7 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
             stt_lang = None if source_lang == "auto" else source_lang
             segments = transcribe_audio(stt_audio_path, model_size=model_size, language=stt_lang)
             save_checkpoint(temp_dir, stt_cache_key, segments)
+        timings.append(("🎤 Bóc băng (Whisper STT)", time.time() - t0))
         
         # Giải phóng Whisper model khỏi VRAM để nhường chỗ cho TTS
         try:
@@ -158,6 +193,7 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
         # Bước 3: Dịch thuật
         if progress: progress(0.5, desc="Đang dịch ngữ nghĩa sang tiếng Việt...")
         
+        t0 = time.time()
         trans_cache_key = f'translated_{source_lang}'
         trans_checkpoint = load_checkpoint(temp_dir, trans_cache_key)
         
@@ -195,10 +231,12 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
                 "segments": translated_segments
             })
             
+        timings.append(("🌐 Dịch thuật (Google Translate)", time.time() - t0))
         if cancel_event and cancel_event.is_set(): return
         
         # Bước 4: TTS (Text-to-Speech)
         if progress: progress(0.7, desc=f"Đang sinh giọng đọc AI ({voice_choice})...")
+        t0 = time.time()
         video_duration = None
         try:
             video_clip = VideoFileClip(video_path)
@@ -207,8 +245,9 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
         except:
             pass
         merged_audio_path = generate_voiceover(translated_segments, video_duration=video_duration, engine=tts_engine, voice_mode=voice_mode, voice_instruct=voice_instruct, ref_audio_path=ref_audio_path)
+        tts_label = "🗣️ Sinh giọng (OmniVoice)" if tts_engine == "omnivoice" else "🗣️ Sinh giọng (Edge-TTS)"
+        timings.append((tts_label, time.time() - t0))
 
-        
         if not merged_audio_path or not os.path.exists(merged_audio_path):
             raise Exception("Không tạo được giọng đọc (có thể video gốc không có tiếng nói).")
             
@@ -216,6 +255,7 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
             
         # Bước 5: Ghép nối vào video
         if progress: progress(0.9, desc="Đang ghép đè âm thanh tiếng Việt vào Video gốc...")
+        t0 = time.time()
         final_video = merge_audio_with_video(
             video_path,
             merged_audio_path,
@@ -226,6 +266,7 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
             vocal_audio_path=vocal_path if separate_vocals_flag else None,
             orig_vocal_volume=orig_vocal_volume
         )
+        timings.append(("🎬 Ghép âm thanh vào video", time.time() - t0))
         
         # Bước 6: Đốt phụ đề
         out1 = None
@@ -235,6 +276,7 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
         if burn_subs:
             if progress: progress(0.95, desc="Đang đốt phụ đề vào video...")
             
+            t0 = time.time()
             # Luôn build cả 2 file .srt
             vi_srt_path = os.path.join(temp_dir, 'sub_vi.srt')
             zh_srt_path = os.path.join(temp_dir, 'sub_zh.srt')
@@ -260,8 +302,13 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
                 except Exception as e:
                     print(f"Lỗi khi đốt phụ đề: {e}. Bỏ qua...")
                     out1 = None
+            timings.append(("📝 Đốt phụ đề vào video", time.time() - t0))
 
-        if progress: progress(1.0, desc="Hoàn tất!")
+        # In bảng tổng kết thời gian
+        total_time = time.time() - pipeline_start
+        _print_timing_summary(timings, total_time)
+        
+        if progress: progress(1.0, desc=f"Hoàn tất! Tổng thời gian: {_fmt_dur(total_time)}")
         print(f"Xử lý thành công! File xuất ra tại: {final_video}")
         if out1:
             print(f"File kèm phụ đề tại: {out1}")
