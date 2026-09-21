@@ -129,6 +129,11 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
           f"(giảm ~{(1 - len(groups)/max(len(segments), 1))*100:.0f}% lượt sinh).")
 
     # 1. Sinh âm thanh cho từng cụm câu
+    # Kỹ thuật "Self-Reference": ở mode auto, chunk đầu tiên sinh giọng ngẫu nhiên,
+    # sau đó dùng chính chunk đó làm ref_audio cho các chunk tiếp theo → giọng nhất quán.
+    auto_ref_audio = None
+    auto_ref_text = None
+
     for i, group in enumerate(groups):
         combined_text = " ".join(s.get('translated_text', "").strip() for s in group)
         if not combined_text.strip():
@@ -139,6 +144,10 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
 
         out_path = os.path.join(tts_chunks_dir, f'chunk_{i}.wav')
         if os.path.exists(out_path):
+            # Nếu chunk đã tồn tại và chưa có auto_ref → dùng luôn chunk này làm ref
+            if voice_mode == "auto" and auto_ref_audio is None:
+                auto_ref_audio = out_path
+                auto_ref_text = clean_text
             continue
 
         try:
@@ -152,10 +161,22 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
                 kwargs["ref_audio"] = ref_audio_path
                 if ref_text:
                     kwargs["ref_text"] = ref_text
+            elif voice_mode == "auto" and auto_ref_audio is not None:
+                # Self-reference: dùng chunk đầu tiên làm giọng mẫu
+                kwargs["ref_audio"] = auto_ref_audio
+                if auto_ref_text:
+                    kwargs["ref_text"] = auto_ref_text
 
             audio_list = model.generate(**kwargs)
             sf.write(out_path, audio_list[0], 24000)
-            print(f"[{i+1}/{len(groups)}] OmniVoice OK: {clean_text[:40]}...")
+
+            # Lưu chunk đầu tiên làm giọng mẫu cho auto mode
+            if voice_mode == "auto" and auto_ref_audio is None:
+                auto_ref_audio = out_path
+                auto_ref_text = clean_text
+                print(f"[{i+1}/{len(groups)}] OmniVoice OK (giọng mẫu auto): {clean_text[:40]}...")
+            else:
+                print(f"[{i+1}/{len(groups)}] OmniVoice OK: {clean_text[:40]}...")
         except Exception as e:
             print(f"Cảnh báo: cụm {i} OmniVoice lỗi ({e}), dùng edge-tts fallback...")
             fallback_mp3 = os.path.join(tts_chunks_dir, f'fallback_{i}.mp3')
