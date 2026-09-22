@@ -5,6 +5,7 @@ import threading
 import subprocess
 import json
 from main import process_video, remix_video_audio
+from modules.translator import get_saved_gemini_key, save_gemini_key
 
 import queue
 import sys
@@ -138,7 +139,7 @@ def preview_voice(text, tts_engine_choice, voice_mode_choice, voice_instruct, re
     return out_path
 
 
-def run_dubbing(url, source_lang_ui, voice_name, whisper_model, orig_volume, dub_volume, bgm_volume, orig_vocal_volume, separate_vocals_flag, burn_subs_flag, sub_style_ui, tts_engine_choice, voice_mode_choice, voice_instruct, ref_audio, saved_voice, progress=gr.Progress()):
+def run_dubbing(url, source_lang_ui, voice_name, whisper_model, orig_volume, dub_volume, bgm_volume, orig_vocal_volume, separate_vocals_flag, burn_subs_flag, sub_style_ui, tts_engine_choice, voice_mode_choice, voice_instruct, ref_audio, saved_voice, trans_engine_choice, gemini_api_key, progress=gr.Progress()):
     global cancel_event
     cancel_event.clear()
     
@@ -186,6 +187,10 @@ def run_dubbing(url, source_lang_ui, voice_name, whisper_model, orig_volume, dub
     style_map = {"Tiếng Việt (lồng tiếng)": "vi", "Cả hai (Việt + Trung)": "both", "Tiếng Trung gốc": "zh"}
     sub_style = style_map.get(sub_style_ui, "vi")
     
+    trans_engine = "gemini" if "Gemini" in str(trans_engine_choice) else "google"
+    if gemini_api_key and gemini_api_key.strip():
+        save_gemini_key(gemini_api_key.strip())
+
     log_history = ""
     yield log_history, None, None, None, None, None, None, None, None
     
@@ -208,6 +213,8 @@ def run_dubbing(url, source_lang_ui, voice_name, whisper_model, orig_volume, dub
                 source_lang=source_lang,
                 burn_subs=burn_subs_flag,
                 sub_style=sub_style,
+                translation_engine=trans_engine,
+                gemini_api_key=gemini_api_key.strip() if gemini_api_key else None,
             )
             q.put(("DONE", result_dict))
         except Exception as e:
@@ -346,6 +353,22 @@ with gr.Blocks(title="AI YouTube Dubber", theme=gr.themes.Soft()) as app:
         whisper_dropdown = gr.Dropdown(
             choices=["tiny", "base", "small", "medium"],
             value="small", label="Model Whisper", scale=1
+        )
+    
+    with gr.Row():
+        trans_engine_radio = gr.Radio(
+            choices=["✨ AI Gemini (Mềm mại, tự nhiên)", "🌐 Google Dịch (Tiêu chuẩn)"],
+            value="✨ AI Gemini (Mềm mại, tự nhiên)",
+            label="🤖 Phương thức Dịch thuật",
+            scale=2
+        )
+        gemini_key_input = gr.Textbox(
+            label="🔑 Gemini API Key (miễn phí từ aistudio.google.com)",
+            placeholder="Nhập API Key...",
+            value=get_saved_gemini_key() or "",
+            type="password",
+            scale=2,
+            visible=True
         )
     with gr.Accordion("🎚️ Bộ điều chỉnh âm lượng (Volume Mixer)", open=True):
         with gr.Row():
@@ -511,6 +534,16 @@ with gr.Blocks(title="AI YouTube Dubber", theme=gr.themes.Soft()) as app:
     # Events
     url_input.change(fn=detect_duration, inputs=url_input, outputs=duration_display)
     
+    def update_trans_engine_controls(choice):
+        show_key = "Gemini" in str(choice)
+        return gr.update(visible=show_key)
+
+    trans_engine_radio.change(
+        fn=update_trans_engine_controls,
+        inputs=trans_engine_radio,
+        outputs=gemini_key_input
+    )
+
     tts_engine_dropdown.change(
         fn=update_omnivoice_controls,
         inputs=tts_engine_dropdown,
@@ -542,7 +575,8 @@ with gr.Blocks(title="AI YouTube Dubber", theme=gr.themes.Soft()) as app:
             orig_volume_slider, dub_volume_slider, bgm_volume_slider, orig_vocal_volume_slider,
             separate_vocals_checkbox, burn_subs_checkbox, sub_style_dropdown,
             tts_engine_dropdown, voice_mode_radio, voice_instruct_text,
-            ref_audio_upload, saved_voice_dropdown
+            ref_audio_upload, saved_voice_dropdown,
+            trans_engine_radio, gemini_key_input
         ],
         outputs=[log_output, video_output, subtitled_video_output, subtitle_vi_output, subtitle_zh_output, no_music_output, vocal_output, tts_output, transcript_output]
     )

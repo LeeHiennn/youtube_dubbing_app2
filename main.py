@@ -69,9 +69,9 @@ def cleanup_temp_files():
     except Exception as e:
         print(f"Không thể xóa thư mục tạm: {e}")
 
-def process_video(url, voice_choice, progress=None, model_size="small", orig_audio_volume=0.3, cancel_event=None, separate_vocals_flag=True, tts_engine="edge", voice_mode="auto", voice_instruct=None, ref_audio_path=None, source_lang="auto", burn_subs=True, sub_style="vi", dub_volume=1.5, bgm_volume=0.6, orig_vocal_volume=0.0):
+def process_video(url, voice_choice, progress=None, model_size="small", orig_audio_volume=0.3, cancel_event=None, separate_vocals_flag=True, tts_engine="edge", voice_mode="auto", voice_instruct=None, ref_audio_path=None, source_lang="auto", burn_subs=True, sub_style="vi", dub_volume=1.5, bgm_volume=0.6, orig_vocal_volume=0.0, translation_engine="gemini", gemini_api_key=None):
     """
-    Quy trình xử lý video, hỗ trợ Gradio Progress Bar, Checkpointing, Cancel Event, và Multi-channel Audio Mixing.
+    Quy trình xử lý video, hỗ trợ Gradio Progress Bar, Checkpointing, Cancel Event, Multi-channel Audio Mixing, và AI Translation.
     """
     if progress: progress(0, desc="Bắt đầu quá trình...")
     
@@ -194,9 +194,12 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
         if progress: progress(0.5, desc="Đang dịch ngữ nghĩa sang tiếng Việt...")
         
         t0 = time.time()
-        trans_cache_key = f'translated_{source_lang}'
+        trans_cache_key = f'translated_{source_lang}_{translation_engine}'
         trans_checkpoint = load_checkpoint(temp_dir, trans_cache_key)
-        
+        if not trans_checkpoint and translation_engine == 'google':
+            # Fallback đọc checkpoint cũ chưa có hậu tố engine
+            trans_checkpoint = load_checkpoint(temp_dir, f'translated_{source_lang}')
+
         if trans_checkpoint:
             # Hỗ trợ cả định dạng mới (dict có "segments") và cũ (list trực tiếp)
             if isinstance(trans_checkpoint, dict) and 'segments' in trans_checkpoint:
@@ -205,33 +208,44 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
                 cached_segments = trans_checkpoint
             else:
                 cached_segments = None
-            
+
             if cached_segments:
-                print(f"Phục hồi từ checkpoint dịch thuật ({source_lang}), chạy retry segment lỗi...")
-                # Re-pass qua translate_segments để retry mọi segment translation_ok=False
-                translated_segments = translate_segments(cached_segments, source_lang=source_lang)
-                # Lưu đè checkpoint với định dạng mới (tự chữa segment lỗi)
+                print(f"Phục hồi từ checkpoint dịch thuật ({source_lang}, engine={translation_engine}), chạy retry segment lỗi nếu có...")
+                translated_segments = translate_segments(
+                    cached_segments, source_lang=source_lang, target_lang="vi",
+                    engine=translation_engine, gemini_api_key=gemini_api_key
+                )
                 save_checkpoint(temp_dir, trans_cache_key, {
                     "source_lang": source_lang,
                     "target_lang": "vi",
+                    "engine": translation_engine,
                     "segments": translated_segments
                 })
             else:
-                translated_segments = translate_segments(segments, source_lang=source_lang)
+                translated_segments = translate_segments(
+                    segments, source_lang=source_lang, target_lang="vi",
+                    engine=translation_engine, gemini_api_key=gemini_api_key
+                )
                 save_checkpoint(temp_dir, trans_cache_key, {
                     "source_lang": source_lang,
                     "target_lang": "vi",
+                    "engine": translation_engine,
                     "segments": translated_segments
                 })
         else:
-            translated_segments = translate_segments(segments, source_lang=source_lang)
+            translated_segments = translate_segments(
+                segments, source_lang=source_lang, target_lang="vi",
+                engine=translation_engine, gemini_api_key=gemini_api_key
+            )
             save_checkpoint(temp_dir, trans_cache_key, {
                 "source_lang": source_lang,
                 "target_lang": "vi",
+                "engine": translation_engine,
                 "segments": translated_segments
             })
-            
-        timings.append(("🌐 Dịch thuật (Google Translate)", time.time() - t0))
+
+        trans_label = "✨ Dịch thuật (AI Gemini)" if translation_engine == "gemini" else "🌐 Dịch thuật (Google Translate)"
+        timings.append((trans_label, time.time() - t0))
         if cancel_event and cancel_event.is_set(): return
         
         # Bước 4: TTS (Text-to-Speech)

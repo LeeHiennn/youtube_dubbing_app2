@@ -23,5 +23,8 @@ temp/
 # Keep saved reference voices
 !saved_voices/**
 
-# Sensitive cookies
+# Sensitive cookies & API keys
 cookies.txt
+.env
+gemini_key.txt
+*.key
