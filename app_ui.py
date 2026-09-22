@@ -141,7 +141,7 @@ def preview_voice(text, tts_engine_choice, voice_mode_choice, voice_instruct, re
     return out_path
 
 
-def run_dubbing(url, source_lang_ui, voice_name, whisper_model, orig_volume, dub_volume, bgm_volume, orig_vocal_volume, separate_vocals_flag, burn_subs_flag, sub_style_ui, tts_engine_choice, voice_mode_choice, voice_instruct, ref_audio, saved_voice, trans_engine_choice, gemini_api_key, progress=gr.Progress()):
+def run_dubbing(url, source_lang_ui, voice_name, whisper_model, orig_volume, dub_volume, bgm_volume, orig_vocal_volume, separate_vocals_flag, burn_subs_flag, sub_style_ui, tts_engine_choice, voice_mode_choice, voice_instruct, ref_audio, saved_voice, trans_engine_choice, gemini_api_key, video_quality_choice="Full HD (1080p)", progress=gr.Progress()):
     global cancel_event
     cancel_event.clear()
     
@@ -217,6 +217,7 @@ def run_dubbing(url, source_lang_ui, voice_name, whisper_model, orig_volume, dub
                 sub_style=sub_style,
                 translation_engine=trans_engine,
                 gemini_api_key=gemini_api_key.strip() if gemini_api_key else None,
+                video_quality=video_quality_choice,
             )
             q.put(("DONE", result_dict))
         except Exception as e:
@@ -336,6 +337,10 @@ with gr.Blocks(title="AI YouTube Dubber", theme=gr.themes.Soft()) as app:
         url_input = gr.Textbox(
             label="🔗 Link YouTube", scale=3,
             placeholder="https://www.youtube.com/watch?v=..."
+        )
+        video_quality_dropdown = gr.Dropdown(
+            choices=["Full HD (1080p) - Khuyên dùng", "Cao nhất (Max: 2K/4K)", "HD (720p)"],
+            value="Full HD (1080p) - Khuyên dùng", label="📺 Chất lượng Video", scale=1
         )
         source_lang_dropdown = gr.Dropdown(
             choices=["Tự động (Auto)", "English", "中文 (Tiếng Trung)"],
@@ -578,7 +583,8 @@ with gr.Blocks(title="AI YouTube Dubber", theme=gr.themes.Soft()) as app:
             separate_vocals_checkbox, burn_subs_checkbox, sub_style_dropdown,
             tts_engine_dropdown, voice_mode_radio, voice_instruct_text,
             ref_audio_upload, saved_voice_dropdown,
-            trans_engine_radio, gemini_key_input
+            trans_engine_radio, gemini_key_input,
+            video_quality_dropdown
         ],
         outputs=[log_output, video_output, subtitled_video_output, subtitle_vi_output, subtitle_zh_output, no_music_output, vocal_output, tts_output, transcript_output]
     )

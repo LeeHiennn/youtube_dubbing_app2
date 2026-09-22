@@ -4,6 +4,7 @@ import io
 import json
 import shutil
 import time
+import subprocess
 
 # Đảm bảo in được tiếng Việt trên console Windows (chỉ bật trên Windows, giữ line_buffering)
 if sys.platform == 'win32':
@@ -69,9 +70,9 @@ def cleanup_temp_files():
     except Exception as e:
         print(f"Không thể xóa thư mục tạm: {e}")
 
-def process_video(url, voice_choice, progress=None, model_size="small", orig_audio_volume=0.3, cancel_event=None, separate_vocals_flag=True, tts_engine="edge", voice_mode="auto", voice_instruct=None, ref_audio_path=None, source_lang="auto", burn_subs=True, sub_style="vi", dub_volume=1.5, bgm_volume=0.6, orig_vocal_volume=0.0, translation_engine="gemini", gemini_api_key=None):
+def process_video(url, voice_choice, progress=None, model_size="small", orig_audio_volume=0.3, cancel_event=None, separate_vocals_flag=True, tts_engine="edge", voice_mode="auto", voice_instruct=None, ref_audio_path=None, source_lang="auto", burn_subs=True, sub_style="vi", dub_volume=1.5, bgm_volume=0.6, orig_vocal_volume=0.0, translation_engine="gemini", gemini_api_key=None, video_quality="Full HD (1080p)"):
     """
-    Quy trình xử lý video, hỗ trợ Gradio Progress Bar, Checkpointing, Cancel Event, Multi-channel Audio Mixing, và AI Translation.
+    Quy trình xử lý video, hỗ trợ Gradio Progress Bar, Checkpointing, Cancel Event, Multi-channel Audio Mixing, AI Translation, và chất lượng Video tùy chọn.
     """
     if progress: progress(0, desc="Bắt đầu quá trình...")
     
@@ -109,16 +110,31 @@ def process_video(url, voice_choice, progress=None, model_size="small", orig_aud
         if cancel_event and cancel_event.is_set(): return
         
         # Bước 1: Tải Media
-        if progress: progress(0.05, desc="Đang tải Video & Audio từ YouTube...")
+        if progress: progress(0.05, desc=f"Đang tải Video ({video_quality}) & Audio từ YouTube...")
         print(f"Bắt đầu xử lý URL: {url}")
         
         t0 = time.time()
         video_path = os.path.join(temp_dir, 'video.mp4')
         audio_path = os.path.join(temp_dir, 'video.mp3')
+        need_download = True
+
+        # Kiểm tra file đã tải trước đó có đạt độ phân giải cao không
         if os.path.exists(video_path) and os.path.exists(audio_path):
-            print("Phục hồi từ file media đã tải...")
-        else:
-            media_paths = download_media(url)
+            try:
+                probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                             '-show_entries', 'stream=height', '-of', 'csv=p=0', video_path]
+                h_res = subprocess.run(probe_cmd, capture_output=True, text=True)
+                curr_h = int(h_res.stdout.strip()) if h_res.stdout.strip() else 0
+                if curr_h >= 720:
+                    print(f"Phục hồi từ file media đã tải chất lượng cao ({curr_h}p)...")
+                    need_download = False
+                else:
+                    print(f"Phát hiện file cũ chỉ có {curr_h}p (chất lượng thấp từ lần chạy trước), tự động tải lại bản sắc nét...")
+            except Exception:
+                need_download = False
+
+        if need_download:
+            media_paths = download_media(url, quality=video_quality)
             video_path = media_paths['video']
             audio_path = media_paths['audio']
         timings.append(("📥 Tải video YouTube", time.time() - t0))

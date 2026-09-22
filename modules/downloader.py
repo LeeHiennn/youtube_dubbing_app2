@@ -1,10 +1,11 @@
 import os
 import sys
+import subprocess
 import yt_dlp
 
-def download_media(url):
+def download_media(url, quality="1080"):
     """
-    Tải video (max 1080p, mp4) và trích xuất âm thanh (mp3) từ YouTube.
+    Tải video chất lượng cao (1080p, 2K/4K, hoặc 720p) và trích xuất âm thanh (mp3) từ YouTube.
     Lưu vào thư mục temp/ và trả về đường dẫn 2 file.
     """
     # Lấy đường dẫn thư mục gốc của project (cha của thư mục modules/)
@@ -20,9 +21,23 @@ def download_media(url):
         os.remove(video_path)
     if os.path.exists(audio_path):
         os.remove(audio_path)
+
+    # Cấu hình chất lượng video
+    q_str = str(quality).lower()
+    if "max" in q_str or "4k" in q_str or "2k" in q_str or "cao nhất" in q_str:
+        format_selector = 'bestvideo+bestaudio/best'
+        target_quality_name = "Tối đa (2K/4K nếu có)"
+    elif "720" in q_str:
+        format_selector = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best'
+        target_quality_name = "HD 720p"
+    else:
+        format_selector = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+        target_quality_name = "Full HD 1080p"
+
+    print(f"🎬 Bắt đầu tải video từ YouTube (Chất lượng mục tiêu: {target_quality_name})...")
         
     base_ydl_opts = {
-        'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+        'format': format_selector,
         'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
         'merge_output_format': 'mp4',
         'keepvideo': True, # Giữ lại file video gốc sau khi đã trích xuất audio
@@ -101,7 +116,19 @@ def download_media(url):
         }
         with yt_dlp.YoutubeDL(ydl_opts_mobile) as ydl:
             ydl.download([url])
-        
+    # Kiểm tra và thông báo độ phân giải video thực tế đã tải
+    if os.path.exists(video_path):
+        try:
+            cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                   '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', video_path]
+            probe_res = subprocess.run(cmd, capture_output=True, text=True)
+            if probe_res.returncode == 0 and 'x' in probe_res.stdout:
+                parts = probe_res.stdout.strip().split('x')
+                w, h = int(parts[0]), int(parts[1])
+                print(f"✅ Video tải về thành công với độ phân giải cao: {w}x{h} ({h}p)!")
+        except Exception:
+            pass
+
     return {
         'video': video_path,
         'audio': audio_path
