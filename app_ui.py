@@ -96,7 +96,7 @@ def preview_voice(text, tts_engine_choice, voice_mode_choice, voice_instruct, re
         return out_path
 
     # OmniVoice
-    from modules.tts_engine_omnivoice import _get_model, _prepare_ref_audio
+    from modules.tts_engine_omnivoice import _get_model, _prepare_ref_audio, _transcribe_ref_audio_safe
     model = _get_model()
 
     if voice_mode_choice == "🎭 Clone giọng (Voice Clone)":
@@ -117,16 +117,18 @@ def preview_voice(text, tts_engine_choice, voice_mode_choice, voice_instruct, re
                 except Exception:
                     ref_text = None
             if not ref_text:
-                from modules.stt_engine import transcribe_audio
-                ref_segments = transcribe_audio(audio_path, model_size="tiny")
-                ref_text = " ".join(seg['text'] for seg in ref_segments) if ref_segments else None
+                ref_text = _transcribe_ref_audio_safe(audio_path)
                 if ref_text:
                     try:
                         with open(ref_text_file, 'w', encoding='utf-8') as f:
                             f.write(ref_text)
                     except Exception:
                         pass
-            audio_list = model.generate(text=text, ref_audio=audio_path, ref_text=ref_text, num_step=16)
+            try:
+                clone_prompt = model.create_voice_clone_prompt(audio_path, ref_text=ref_text)
+                audio_list = model.generate(text=text, voice_clone_prompt=clone_prompt, num_step=16)
+            except Exception:
+                audio_list = model.generate(text=text, ref_audio=audio_path, ref_text=ref_text, num_step=16)
         else:
             audio_list = model.generate(text=text, instruct="female", num_step=16)
     elif voice_mode_choice == "🎨 Thiết kế giọng (Voice Design)" and voice_instruct:

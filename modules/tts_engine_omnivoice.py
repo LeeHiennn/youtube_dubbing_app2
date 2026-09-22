@@ -67,25 +67,50 @@ def _get_model():
 def _prepare_ref_audio(ref_audio_path, temp_dir):
     """
     Chuẩn hóa audio mẫu cho Voice Clone:
-    OmniVoice đạt chất lượng tốt nhất và nhanh nhất với mẫu từ 4 đến 7 giây.
-    Nếu audio dài hơn 8 giây, tự động cắt lấy 7 giây đầu để giảm tính toán Cross-Attention O(N^2),
-    tăng tốc độ sinh giọng từ 2x đến 4x và giảm ngốn VRAM.
+    - Chuyển đổi mọi định dạng (mp3, m4a, wav, ogg, webm...) sang WAV mono 24000Hz PCM 16-bit chuẩn bằng FFmpeg.
+    - Cắt tối ưu 7 giây đầu để giảm tính toán và tránh tràn VRAM trên Colab GPU.
     """
     if not ref_audio_path or not os.path.exists(ref_audio_path):
         return ref_audio_path
 
     try:
-        dur = _get_wav_duration(ref_audio_path)
-        if dur > 8.0:
-            print(f"Audio mẫu dài {dur:.1f}s, tự động cắt 7.0s tối ưu nhất để tăng tốc Clone giọng...")
-            trimmed_path = os.path.join(temp_dir, 'ref_audio_trimmed.wav')
-            data, sr = sf.read(ref_audio_path)
-            max_samples = int(sr * 7.0)
-            sf.write(trimmed_path, data[:max_samples], sr)
-            return trimmed_path
+        norm_wav = os.path.join(temp_dir, 'ref_audio_norm24k.wav')
+        cmd = [
+            'ffmpeg', '-y', '-i', ref_audio_path,
+            '-t', '7.0',
+            '-ar', '24000',
+            '-ac', '1',
+            '-c:a', 'pcm_s16le',
+            norm_wav
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0 and os.path.exists(norm_wav) and os.path.getsize(norm_wav) > 1000:
+            print("Đã chuẩn hóa audio mẫu sang mono 24kHz (7s) bằng FFmpeg thành công!")
+            return norm_wav
     except Exception as e:
-        print(f"Không thể cắt audio mẫu: {e}")
+        print(f"Lỗi chuẩn hóa audio mẫu: {e}")
+
     return ref_audio_path
+
+
+def _transcribe_ref_audio_safe(ref_audio_path):
+    """
+    Bóc băng audio mẫu an toàn, KHÔNG đụng chạm file transcript.json của video chính.
+    """
+    try:
+        import whisper
+        import torch
+        # Nạp whisper tiny trên CPU để không tốn VRAM GPU của OmniVoice
+        w_model = whisper.load_model("tiny", device="cpu")
+        res = w_model.transcribe(ref_audio_path)
+        text = res.get('text', '').strip()
+        del w_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return text if text else None
+    except Exception as e:
+        print(f"Không thể nhận diện transcript audio mẫu: {e}")
+        return None
 
 
 def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct=None, ref_audio_path=None):
@@ -96,7 +121,8 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
     tts_chunks_dir = os.path.join(temp_dir, 'tts_chunks')
     os.makedirs(tts_chunks_dir, exist_ok=True)
 
-    # Pre-load ref_text cho clone mode và cache lại
+    # 1. Chuẩn bị VoiceClonePrompt tái sử dụng (pre-computed prompt)
+    clone_prompt = None
     ref_text = None
     if ref_audio_path and voice_mode == "clone":
         ref_audio_path = _prepare_ref_audio(ref_audio_path, temp_dir)
@@ -110,29 +136,30 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
                 ref_text = None
 
         if not ref_text:
-            from modules.stt_engine import transcribe_audio
-            ref_segments = transcribe_audio(ref_audio_path, model_size="tiny")
-            if ref_segments:
-                ref_text = " ".join(seg['text'] for seg in ref_segments)
+            ref_text = _transcribe_ref_audio_safe(ref_audio_path)
+            if ref_text:
                 print(f"Tự động nhận dạng transcript từ audio mẫu: {ref_text[:60]}...")
                 try:
                     with open(ref_text_file, 'w', encoding='utf-8') as f:
                         f.write(ref_text)
                 except Exception:
                     pass
-            else:
-                print("Cảnh báo: Không thể nhận diện transcript từ audio mẫu, clone có thể kém chính xác")
+
+        try:
+            print("Đang tạo VoiceClonePrompt từ audio mẫu (tính 1 lần duy nhất cho toàn bộ video)...")
+            clone_prompt = model.create_voice_clone_prompt(ref_audio_path, ref_text=ref_text)
+            print("✅ VoiceClonePrompt đã khởi tạo thành công!")
+        except Exception as e:
+            print(f"Cảnh báo: create_voice_clone_prompt lỗi ({e}), chuyển sang truyền trực tiếp ref_audio...")
+            clone_prompt = None
 
     # Gom các segment thành cụm câu tự nhiên (dùng shared grouper)
     groups = group_into_sentences(segments, text_key='translated_text')
     print(f"Tối ưu gom câu: Gom {len(segments)} segments vụn thành {len(groups)} cụm câu tự nhiên "
           f"(giảm ~{(1 - len(groups)/max(len(segments), 1))*100:.0f}% lượt sinh).")
 
-    # 1. Sinh âm thanh cho từng cụm câu
-    # Kỹ thuật "Self-Reference": ở mode auto, chunk đầu tiên sinh giọng ngẫu nhiên,
-    # sau đó dùng chính chunk đó làm ref_audio cho các chunk tiếp theo → giọng nhất quán.
-    auto_ref_audio = None
-    auto_ref_text = None
+    # 2. Sinh âm thanh cho từng cụm câu
+    auto_clone_prompt = None
 
     for i, group in enumerate(groups):
         combined_text = " ".join(s.get('translated_text', "").strip() for s in group)
@@ -144,10 +171,12 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
 
         out_path = os.path.join(tts_chunks_dir, f'chunk_{i}.wav')
         if os.path.exists(out_path):
-            # Nếu chunk đã tồn tại và chưa có auto_ref → dùng luôn chunk này làm ref
-            if voice_mode == "auto" and auto_ref_audio is None:
-                auto_ref_audio = out_path
-                auto_ref_text = clean_text
+            # Nếu chunk đã tồn tại và chưa có auto prompt → thử tạo từ chunk_0
+            if voice_mode == "auto" and auto_clone_prompt is None:
+                try:
+                    auto_clone_prompt = model.create_voice_clone_prompt(out_path, ref_text=clean_text)
+                except Exception:
+                    pass
             continue
 
         try:
@@ -157,23 +186,25 @@ def generate_omnivoice_tts(segments, temp_dir, voice_mode="auto", voice_instruct
             }
             if voice_instruct:
                 kwargs["instruct"] = voice_instruct
-            elif voice_mode == "clone" and ref_audio_path:
-                kwargs["ref_audio"] = ref_audio_path
-                if ref_text:
-                    kwargs["ref_text"] = ref_text
-            elif voice_mode == "auto" and auto_ref_audio is not None:
-                # Self-reference: dùng chunk đầu tiên làm giọng mẫu
-                kwargs["ref_audio"] = auto_ref_audio
-                if auto_ref_text:
-                    kwargs["ref_text"] = auto_ref_text
+            elif voice_mode == "clone":
+                if clone_prompt is not None:
+                    kwargs["voice_clone_prompt"] = clone_prompt
+                elif ref_audio_path:
+                    kwargs["ref_audio"] = ref_audio_path
+                    if ref_text:
+                        kwargs["ref_text"] = ref_text
+            elif voice_mode == "auto" and auto_clone_prompt is not None:
+                kwargs["voice_clone_prompt"] = auto_clone_prompt
 
             audio_list = model.generate(**kwargs)
             sf.write(out_path, audio_list[0], 24000)
 
             # Lưu chunk đầu tiên làm giọng mẫu cho auto mode
-            if voice_mode == "auto" and auto_ref_audio is None:
-                auto_ref_audio = out_path
-                auto_ref_text = clean_text
+            if voice_mode == "auto" and auto_clone_prompt is None:
+                try:
+                    auto_clone_prompt = model.create_voice_clone_prompt(out_path, ref_text=clean_text)
+                except Exception:
+                    pass
                 print(f"[{i+1}/{len(groups)}] OmniVoice OK (giọng mẫu auto): {clean_text[:40]}...")
             else:
                 print(f"[{i+1}/{len(groups)}] OmniVoice OK: {clean_text[:40]}...")
