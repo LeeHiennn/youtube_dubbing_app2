@@ -40,16 +40,17 @@ def download_media(url):
     cookie_file = os.path.join(base_dir, 'cookies.txt')
     downloaded = False
     
-    # 1. Thử dùng cookie file với Node.js runtime (giải mã challenge của YouTube)
+    # 1. Thử dùng cookie file (nếu người dùng có upload cookies.txt)
     if os.path.exists(cookie_file):
         try:
+            print("Đang thử tải video bằng cookies.txt...")
             ydl_opts_cookie = dict(base_ydl_opts)
             ydl_opts_cookie['cookiefile'] = cookie_file
             with yt_dlp.YoutubeDL(ydl_opts_cookie) as ydl:
                 ydl.download([url])
             downloaded = True
         except Exception as e:
-            print(f"Cảnh báo: Dùng cookies.txt gặp lỗi ({e}). Đang tự động chuyển sang tải qua Mobile Client...")
+            print(f"Cảnh báo: Dùng cookies.txt gặp lỗi ({e}). Đang chuyển sang phương thức khác...")
             downloaded = False
 
     # 2. Nếu trên Windows và chưa tải được: thử cookie từ Chrome
@@ -63,7 +64,34 @@ def download_media(url):
         except Exception:
             downloaded = False
 
-    # 3. Tải trực tiếp qua giả lập Mobile Client (iOS & Android) nếu không có cookie
+    # 3. Tải bằng client mặc định của yt-dlp (tự thương lượng visionos/web, tránh dính lỗi SABR 403 của ios/android)
+    if not downloaded:
+        try:
+            ydl_opts_default = dict(base_ydl_opts)
+            with yt_dlp.YoutubeDL(ydl_opts_default) as ydl:
+                ydl.download([url])
+            downloaded = True
+        except Exception as e:
+            print(f"Client mặc định thất bại: {e}. Đang thử client dự phòng...")
+            downloaded = False
+
+    # 4. Fallback: loại trừ android_sdkless
+    if not downloaded:
+        try:
+            ydl_opts_fallback = dict(base_ydl_opts)
+            ydl_opts_fallback['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['default', '-android_sdkless']
+                }
+            }
+            with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
+                ydl.download([url])
+            downloaded = True
+        except Exception as e:
+            print(f"Fallback 1 thất bại: {e}. Đang thử client di động...")
+            downloaded = False
+
+    # 5. Fallback cuối cùng: Mobile client
     if not downloaded:
         ydl_opts_mobile = dict(base_ydl_opts)
         ydl_opts_mobile['extractor_args'] = {
